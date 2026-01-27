@@ -9,7 +9,7 @@
 #include "core/os/os.h"
 #include "scene/2d/node_2d.h"
 #include "scene/resources/world_2d.h"
-#include "servers/physics_server_2d.h"
+#include "servers/physics_2d/physics_server_2d.h"
 
 #include <vector>
 
