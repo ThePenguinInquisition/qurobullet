@@ -7,7 +7,7 @@
 #include "resource/bullet_texture.h"
 
 #include "scene/main/node.h"
-#include "servers/physics_server_2d.h"
+#include "servers/physics_2d/physics_server_2d.h"
 
 #include "core/templates/vector.h"
 #include "core/templates/hash_map.h"
