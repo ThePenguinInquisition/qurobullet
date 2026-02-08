@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="BulletTexture" inherits="Resource" version="4.4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A BulletPath useful for simple bullets.
+	</brief_description>
+	<description>
+		A BulletPath where the motion is defined with an initial [code]speed[/code] and [code]rotation[/code]. This velocity will be modfied over time using the [code]linear_acceleration[/code] and [code]curve_rate[/code] terms.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="lifetime" type="float" setter="set_lifetime" getter="get_lifetime" default="0">
+            The maximum lifetime of the bullet. If 0.0, bullet will not pop automatically from exceeding it's lifetime.
+		</member>
+		<member name="speed" type="float" setter="set_init_speed" getter="get_init_speed" default="100">
+			The speed of the bullet upon spawn. May be negative.
+		</member>
+		<member name="linear_acceleration" type="float" setter="set_linear_acceleration" getter="get_linear_acceleration" default="0">
+			The rate at which the speed of the bullet changes in a second.
+		</member>
+        <member name="max_speed" type="float" setter="set_max_speed" getter="get_max_speed" default="500">
+			The maximium speed the bullet may travel at.
+		</member>
+        <member name="min_speed" type="float" setter="set_min_speed" getter="get_min_speed" default="500">
+			The minimum speed the bullet may travel at. May be negative.
+		</member>
+        <member name="rotation" type="float" setter="set_rotation" getter="get_rotation" default="0">
+			The rotation of the bullet upon spawn in radians
+		</member>
+		<member name="curve_rate" type="float" setter="set_curve_rate" getter="get_curve_rate" default="0">
+			The rate at which the rotation of the bullet changes in radians/second.
+		</member>
+	</members>
+</class>

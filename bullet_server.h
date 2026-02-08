@@ -3,18 +3,17 @@
 
 #include "bullet.h"
 #include "bullet_server_relay.h"
-#include "bullet_type.h"
+#include "resource/bullet_path.h"
+#include "resource/bullet_texture.h"
 
-#include "core/config/engine.h"
-#include "core/os/os.h"
-#include "scene/2d/node_2d.h"
-#include "scene/resources/world_2d.h"
-#include "servers/physics_2d/physics_server_2d.h"
+#include "scene/main/node.h"
+#include "servers/physics_server_2d.h"
 
-#include <vector>
+#include "core/templates/vector.h"
+#include "core/templates/hash_map.h"
 
-class BulletServer : public Node2D {
-	GDCLASS(BulletServer, Node2D);
+class BulletServer : public Node {
+	GDCLASS(BulletServer, Node);
 
 public:
 	enum AreaMode {
@@ -25,13 +24,12 @@ public:
 
 private:
 	int bullet_pool_size;
+	int live_bullet_count;
+	Bullet** bullet_pool;
 
 	bool pop_on_collide;
 	float max_lifetime;
 	int max_collisions_per_bullet;
-
-	Vector<Bullet *> live_bullets;
-	Vector<Bullet *> dead_bullets;
 
 	AreaMode play_area_mode;
 	Rect2 play_area_rect;
@@ -42,13 +40,17 @@ private:
 
 	void _process_bullets(float delta);
 
-	void _handle_collisions(Bullet *bullet, PhysicsDirectSpaceState2D *space_state);
+	void _handle_collisions(Bullet* bullet, PhysicsDirectSpaceState2D* space_state, Dictionary out);
 
 	void _init_bullets();
-	void _create_bullet();
 	void _uninit_bullets();
 
+	void _free_bullet(int index);
+	void _heapify(int index);
+
 	void _update_play_area();
+
+	bool _bullet_trajectory_valid(const Vector2 &p_pos, const Vector2 &p_dir) const;
 
 protected:
 	static void _bind_methods();
@@ -59,8 +61,8 @@ public:
 	BulletServer();
 	~BulletServer();
 
-	void spawn_bullet(const Ref<BulletType> &p_type, const Vector2 &p_position, const Vector2 &p_direction);
-	void spawn_volley(const Ref<BulletType> &p_type, const Vector2 &p_position, const Array &p_volley);
+	void spawn_bullet(const Vector2 &p_position, const Ref<BulletPath> &p_path,  const Ref<BulletTexture> &p_texture, const Dictionary &p_custom_data = Dictionary());
+	void spawn_volley(const Vector2 &p_position, const Array &p_volley, const Ref<BulletTexture> &p_texture, const Dictionary &p_custom_data = Dictionary());
 
 	void clear_bullets();
 	int get_live_bullet_count();

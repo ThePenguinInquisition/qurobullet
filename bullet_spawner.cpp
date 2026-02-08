@@ -54,7 +54,7 @@ void BulletSpawner::_notification(int p_what) {
 
 //public functions
 bool BulletSpawner::can_fire() const {
-	return !Engine::get_singleton()->is_editor_hint() && is_inside_tree() && bullet_type.is_valid();
+	return !Engine::get_singleton()->is_editor_hint() && is_inside_tree() && bullet_path.is_valid() && bullet_texture.is_valid();
 }
 
 void BulletSpawner::fire() {
@@ -63,11 +63,14 @@ void BulletSpawner::fire() {
 	}
 	switch (pattern_mode) {
 		case ALL: {
-			emit_signal("volley_fired", bullet_type->duplicate(), get_global_position(), get_scattered_volley());
+			emit_signal("volley_fired", get_global_position(), get_scattered_volley(), 
+					bullet_texture, custom_bullet_data);
 		} break;
 
 		case MANUAL: {
-			emit_signal("volley_fired", bullet_type->duplicate(), get_global_position(), _get_selected_shots(get_scattered_volley(), active_shot_indices));
+			emit_signal("volley_fired", get_global_position(), 
+					_get_selected_shots(get_scattered_volley(), active_shot_indices), bullet_texture, 
+					custom_bullet_data);
 		} break;
 
 		default:
@@ -79,7 +82,7 @@ void BulletSpawner::fire_shots(const PackedInt32Array &p_shot_indices) {
 	if (!can_fire()) {
 		return;
 	}
-	emit_signal("volley_fired", bullet_type->duplicate(), get_global_position(), _get_selected_shots(get_scattered_volley(), p_shot_indices));
+	emit_signal("volley_fired", bullet_path, get_global_position(), _get_selected_shots(get_scattered_volley(), p_shot_indices), bullet_texture, custom_bullet_data);
 }
 
 Array BulletSpawner::get_volley() {
@@ -104,7 +107,9 @@ Array BulletSpawner::get_scattered_volley() {
 			for (int i = 0; i < s_volley.size(); i++) {
 				rand_offset = Math::randf() * scatter_range - scatter_range / 2;
 				Dictionary shot_info = s_volley[i];
-				shot_info["direction"] = Vector2(shot_info["direction"]).rotated(rand_offset);
+				Vector2 dir = Vector2(shot_info["direction"]).rotated(rand_offset);
+				shot_info["direction"] = dir;
+				if(!bullet_path.is_null()) { shot_info["path"] = bullet_path->rotated(dir.angle()); }
 			}
 			break;
 
@@ -112,7 +117,9 @@ Array BulletSpawner::get_scattered_volley() {
 			rand_offset = Math::randf() * scatter_range - scatter_range / 2;
 			for (int i = 0; i < s_volley.size(); i++) {
 				Dictionary shot_info = s_volley[i];
-				shot_info["direction"] = Vector2(shot_info["direction"]).rotated(rand_offset);
+				Vector2 dir = Vector2(shot_info["direction"]).rotated(rand_offset);
+				shot_info["direction"] = dir;
+				if(!bullet_path.is_null()) { shot_info["path"] = bullet_path->rotated(dir.angle()); }
 			}
 			break;
 
@@ -147,13 +154,17 @@ void BulletSpawner::_notify_volley_changed() {
 }
 
 Array BulletSpawner::_create_volley() const {
+	ERR_FAIL_COND_V_MSG(!Engine::get_singleton()->is_editor_hint() && bullet_path.is_null(), Array(), "Cannot create volley if BulletSpawner has no BulletPath.");
+
 	Array volley;
 	if (_get_unique_shot_count(true) == 1) {
-		Vector2 dir = Vector2(1, 0).rotated(arc_rotation);
+		Vector2 normal = Vector2(1, 0).rotated(arc_rotation);
 		Dictionary shot;
-		shot["normal"] = dir;
-		shot["position"] = _get_shot_position(dir);
-		shot["direction"] = _get_shot_direction(dir * radius, dir);
+		shot["normal"] = normal;
+		shot["position"] = _get_shot_position(normal);
+		Vector2 dir = _get_shot_direction(shot["position"], normal);
+		shot["direction"] = dir;
+		if (!bullet_path.is_null()) { shot["path"] = bullet_path->rotated(dir.angle()); }
 		volley.push_back(shot);
 		return volley;
 	}
@@ -163,9 +174,9 @@ Array BulletSpawner::_create_volley() const {
 	bool spacing_maxed = false;
 
 	float volley_start = -arc_extent;
-	if (spacing > 2 * Math::PI / shot_count) {
-		spacing = 2 * Math::PI / shot_count;
-		volley_start = -Math::PI + spacing / 2;
+	if (spacing > 2 * Math_PI / shot_count) {
+		spacing = 2 * Math_PI / shot_count;
+		volley_start = -Math_PI + spacing / 2;
 		spacing_maxed = true;
 	}
 
@@ -176,12 +187,14 @@ Array BulletSpawner::_create_volley() const {
 		}
 		shot_angle += volley_start;
 		Vector2 shot_normal = Vector2(1, 0).rotated(shot_angle);
-		if (arc_width >= 2 * Math::PI || Math::abs(shot_normal.angle()) <= arc_extent + 0.001) {
+		if (arc_width >= 2 * Math_PI || Math::abs(shot_normal.angle()) <= arc_extent + 0.001) {
 			Dictionary shot;
 			shot_normal = shot_normal.rotated(arc_rotation);
 			shot["normal"] = shot_normal;
 			shot["position"] = _get_shot_position(shot_normal);
-			shot["direction"] = _get_shot_direction(shot["position"], shot_normal);
+			Vector2 dir = _get_shot_direction(shot["position"], shot_normal);
+			shot["direction"] = dir;
+			if (!bullet_path.is_null()) { shot["path"] = bullet_path->rotated(dir.angle()); }
 			volley.push_back(shot);
 		}
 	}
@@ -254,13 +267,30 @@ int BulletSpawner::get_interval_frames() const {
 	return interval_frames;
 }
 
-void BulletSpawner::set_bullet_type(const Ref<BulletType> &p_type) {
-	bullet_type = p_type;
+void BulletSpawner::set_bullet_path(const Ref<BulletPath> &p_path) {
+	bullet_path = p_path;
 	_notify_volley_changed();
 }
 
-Ref<BulletType> BulletSpawner::get_bullet_type() const {
-	return bullet_type;
+Ref<BulletPath> BulletSpawner::get_bullet_path() const {
+	return bullet_path;
+}
+
+void BulletSpawner::set_bullet_texture(const Ref<BulletTexture> &p_texture) {
+	bullet_texture = p_texture;
+	_notify_volley_changed();
+}
+
+Ref<BulletTexture> BulletSpawner::get_bullet_texture() const {
+	return bullet_texture;
+}
+
+void BulletSpawner::set_custom_bullet_data(const Dictionary &p_custom_data){
+	custom_bullet_data = p_custom_data;
+}
+
+Dictionary BulletSpawner::get_custom_bullet_data() const {
+	return custom_bullet_data;
 }
 
 void BulletSpawner::set_shot_count(int p_count) {
@@ -491,7 +521,7 @@ void BulletSpawner::_draw_preview(const Color &p_border_col, const Color &p_shot
 			inner_points.set(i, inner_point);
 			outer_points.set(i, outer_point);
 		}
-		if (arc_width < 2 * Math::PI) {
+		if (arc_width < 2 * Math_PI) {
 			outer_points.insert(0, inner_points[0]);
 			outer_points.push_back(inner_points[inner_points.size() - 1]);
 			draw_polyline(inner_points, p_border_col);
@@ -595,8 +625,12 @@ void BulletSpawner::_validate_property(PropertyInfo &property) const {
 
 PackedStringArray BulletSpawner::get_configuration_warnings() const {
 	PackedStringArray warnings = Node2D::get_configuration_warnings();
-	if (bullet_type.is_null()) {
-		warnings.push_back("This BulletSpawner has no BulletType configured, and will not be able to fire bullets. Consider defining one in the BulletSpawner's properties.");
+	if (bullet_path.is_null()) {
+		warnings.push_back("This BulletSpawner has no BulletPath configured, and will not be able to fire bullets. Consider defining one in the BulletSpawner's properties.");
+	}
+
+	if (bullet_texture.is_null()) {
+		warnings.push_back("This BulletSpawner has no BulletTexture configured, and will not be able to fire bullets. Consider defining one in the BulletSpawner's properties.");
 	}
 
 	if (pattern_mode == MANUAL && !Math::is_zero_approx(arc_offset)) {
@@ -646,8 +680,14 @@ void BulletSpawner::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_arc_offset", "offset"), &BulletSpawner::set_arc_offset);
 	ClassDB::bind_method(D_METHOD("get_arc_offset"), &BulletSpawner::get_arc_offset);
 
-	ClassDB::bind_method(D_METHOD("set_bullet_type", "type"), &BulletSpawner::set_bullet_type);
-	ClassDB::bind_method(D_METHOD("get_bullet_type"), &BulletSpawner::get_bullet_type);
+	ClassDB::bind_method(D_METHOD("set_bullet_path", "type"), &BulletSpawner::set_bullet_path);
+	ClassDB::bind_method(D_METHOD("get_bullet_path"), &BulletSpawner::get_bullet_path);
+	
+	ClassDB::bind_method(D_METHOD("set_bullet_texture", "type"), &BulletSpawner::set_bullet_texture);
+	ClassDB::bind_method(D_METHOD("get_bullet_texture"), &BulletSpawner::get_bullet_texture);
+
+	ClassDB::bind_method(D_METHOD("set_custom_bullet_data", "type"), &BulletSpawner::set_custom_bullet_data);
+	ClassDB::bind_method(D_METHOD("get_custom_bullet_data"), &BulletSpawner::get_custom_bullet_data);
 
 	ClassDB::bind_method(D_METHOD("set_aim_mode", "mode"), &BulletSpawner::set_aim_mode);
 	ClassDB::bind_method(D_METHOD("get_aim_mode"), &BulletSpawner::get_aim_mode);
@@ -701,18 +741,21 @@ void BulletSpawner::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_width", PROPERTY_HINT_RANGE, "", PROPERTY_USAGE_NO_EDITOR), "set_arc_width", "get_arc_width");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_width_degrees", PROPERTY_HINT_RANGE, "0,360,0.1", PROPERTY_USAGE_EDITOR), "set_arc_width_degrees", "get_arc_width_degrees");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_rotation", PROPERTY_HINT_RANGE, "", PROPERTY_USAGE_NO_EDITOR), "set_arc_rotation", "get_arc_rotation");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_rotation_degrees", PROPERTY_HINT_RANGE, "-360,360,0.1,or_lesser,or_greater", PROPERTY_USAGE_EDITOR), "set_arc_rotation_degrees", "get_arc_rotation_degrees");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_rotation_degrees", PROPERTY_HINT_RANGE, "-360,360,0.1,or_less,or_greater", PROPERTY_USAGE_EDITOR), "set_arc_rotation_degrees", "get_arc_rotation_degrees");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "arc_offset", PROPERTY_HINT_RANGE, "-1,1,0.01"), "set_arc_offset", "get_arc_offset");
-	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "bullet_type", PROPERTY_HINT_RESOURCE_TYPE, "BulletType"), "set_bullet_type", "get_bullet_type");
+	ADD_GROUP("Bullet Properties", "");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "bullet_path", PROPERTY_HINT_RESOURCE_TYPE, "BulletPath"), "set_bullet_path", "get_bullet_path");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "bullet_texture", PROPERTY_HINT_RESOURCE_TYPE, "BulletTexture"), "set_bullet_texture", "get_bullet_texture");
+	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "custom_bullet_data"), "set_custom_bullet_data", "get_custom_bullet_data");
 	ADD_GROUP("Aim", "aim_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "aim_mode", PROPERTY_HINT_ENUM, "Radial,Uniform,Relative Target,Global Target"), "set_aim_mode", "get_aim_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "aim_angle", PROPERTY_HINT_RANGE, "", PROPERTY_USAGE_NO_EDITOR), "set_aim_angle", "get_aim_angle");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "aim_angle_degrees", PROPERTY_HINT_RANGE, "-360,360,0.1,or_lesser,or_greater", PROPERTY_USAGE_EDITOR), "set_aim_angle_degrees", "get_aim_angle_degrees");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "aim_angle_degrees", PROPERTY_HINT_RANGE, "-360,360,0.1,or_less,or_greater", PROPERTY_USAGE_EDITOR), "set_aim_angle_degrees", "get_aim_angle_degrees");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "aim_target_position"), "set_aim_target_position", "get_aim_target_position");
 	ADD_GROUP("Scatter", "scatter_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "scatter_mode", PROPERTY_HINT_ENUM, "None,Bullet,Volley"), "set_scatter_mode", "get_scatter_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scatter_range", PROPERTY_HINT_RANGE, "", PROPERTY_USAGE_NO_EDITOR), "set_scatter_range", "get_scatter_range");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scatter_range_degrees", PROPERTY_HINT_RANGE, "0,360,0.1,or_lesser,or_greater", PROPERTY_USAGE_EDITOR), "set_scatter_range_degrees", "get_scatter_range_degrees");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scatter_range_degrees", PROPERTY_HINT_RANGE, "0,360,0.1,or_less,or_greater", PROPERTY_USAGE_EDITOR), "set_scatter_range_degrees", "get_scatter_range_degrees");
 	ADD_GROUP("Pattern", "");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "pattern_mode", PROPERTY_HINT_ENUM, "All,Manual"), "set_pattern_mode", "get_pattern_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "active_shot_indices"), "set_active_shot_indices", "get_active_shot_indices");
@@ -725,7 +768,13 @@ void BulletSpawner::_bind_methods() {
 	ADD_GROUP("Relay", "relay_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "relay_autoconnect"), "set_relay_autoconnect", "get_relay_autoconnect");
 
-	ADD_SIGNAL(MethodInfo("volley_fired", PropertyInfo(Variant::OBJECT, "type", PROPERTY_HINT_RESOURCE_TYPE, "BulletType"), PropertyInfo(Variant::VECTOR2, "origin"), PropertyInfo(Variant::ARRAY, "volley")));
+	ADD_SIGNAL(MethodInfo("volley_fired",
+			PropertyInfo(Variant::OBJECT, "path", PROPERTY_HINT_RESOURCE_TYPE, "BulletPath"),
+			PropertyInfo(Variant::VECTOR2, "origin"),
+			PropertyInfo(Variant::ARRAY, "volley"),
+			PropertyInfo(Variant::OBJECT, "texture", PROPERTY_HINT_RESOURCE_TYPE, "BulletTexture"),
+			PropertyInfo(Variant::DICTIONARY, "custom_data")
+	));
 
 	BIND_ENUM_CONSTANT(ALL);
 	BIND_ENUM_CONSTANT(MANUAL);
@@ -753,7 +802,9 @@ BulletSpawner::BulletSpawner() {
 	arc_rotation = 0.0;
 	arc_offset = 0.0;
 
-	bullet_type = Ref<BulletType>();
+	bullet_path = Ref<BulletPath>();
+	bullet_texture = Ref<BulletTexture>();
+	custom_bullet_data = Dictionary();
 
 	aim_mode = RADIAL;
 	aim_angle = 0.0;

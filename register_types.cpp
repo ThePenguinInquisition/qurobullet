@@ -6,7 +6,13 @@
 #include "bullet_server.h"
 #include "bullet_server_relay.h"
 #include "bullet_spawner.h"
-#include "bullet_type.h"
+
+#include "resource/bullet_path.h"
+#include "resource/simple_bullet_path.h"
+#include "resource/bezier_bullet_path.h"
+#include "resource/force_bullet_path.h"
+#include "resource/bullet_texture.h"
+
 #include "core/config/engine.h"
 #include "core/object/class_db.h"
 
@@ -19,10 +25,16 @@ void initialize_qurobullet_module(ModuleInitializationLevel p_level) {
 	_bullet_server_relay = memnew(BulletServerRelay);
 
 	GDREGISTER_CLASS(Bullet);
-	GDREGISTER_CLASS(BulletType);
 	GDREGISTER_CLASS(BulletServer);
 	GDREGISTER_CLASS(BulletServerRelay);
 	GDREGISTER_CLASS(BulletSpawner);
+
+	GDREGISTER_ABSTRACT_CLASS(BulletPath);
+	GDREGISTER_CLASS(SimpleBulletPath);
+	GDREGISTER_CLASS(BezierBulletPath);
+	GDREGISTER_CLASS(ForceBulletPath);
+	
+	GDREGISTER_CLASS(BulletTexture);
 
 	Engine *engine = Engine::get_singleton();
 	if (engine->has_singleton("BulletServerRelay")) {

@@ -1,5 +1,10 @@
 #include "bullet_server.h"
 
+#include "core/os/time.h"
+#include "core/object/ref_counted.h"
+#include "scene/main/viewport.h"
+#include "scene/resources/world_2d.h"
+
 void BulletServer::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_READY: {
@@ -14,13 +19,15 @@ void BulletServer::_notification(int p_what) {
 			set_process(true);
 			set_physics_process(true);
 			_update_play_area();
+			
+			_uninit_bullets();
 			_init_bullets();
 		} break;
 
 		case NOTIFICATION_PROCESS: {
 			//update bullet canvasitems
-			for (int i = 0; i < live_bullets.size(); i++) {
-				Bullet *bullet = live_bullets[i];
+			for (int i = 0; i < live_bullet_count; i++) {
+				Bullet *bullet = bullet_pool[i];
 				RS::get_singleton()->canvas_item_set_transform(bullet->get_ci_rid(), bullet->get_transform());
 			}
 		} break;
@@ -42,91 +49,151 @@ void BulletServer::_notification(int p_what) {
 	}
 }
 
-void BulletServer::_process_bullets(float delta) {
-	Vector<int> bullet_indices_to_clear;
-	PhysicsDirectSpaceState2D *space_state = get_world_2d()->get_direct_space_state();
+void build_popped_dict (Bullet* bullet, Array out) {
+	Dictionary dict = Dictionary();
+	dict["time"] = bullet->get_age();
+	dict["reason_popped"] = bullet->get_state();
+	dict["position"] = bullet->get_position();
+	dict["path"] = bullet->get_path();
+	dict["texture"] = bullet->get_texture();
+	dict["custom_data"] = bullet->get_custom_data();
+	out.append(dict);
+}
 
-	for (int i = 0; i < live_bullets.size(); i++) {
-		Bullet *bullet = live_bullets[i];
-		RS::get_singleton()->canvas_item_set_draw_index(bullet->get_ci_rid(), i);
+void BulletServer::_process_bullets(float delta) {
+	ERR_FAIL_COND(!is_inside_tree());
+
+	PhysicsDirectSpaceState2D* space_state = get_viewport()->find_world_2d()->get_direct_space_state();
+	Dictionary collision_info = Dictionary();
+	Array popped_bullets = Array();
+
+	for (int i = live_bullet_count - 1; i >= 0; i--) {
+		Bullet* bullet = bullet_pool[i];
+		Ref<BulletPath> path = bullet->get_path();
 
 		if (bullet->is_popped()) {
-			bullet_indices_to_clear.push_back(i);
-		} else if (max_lifetime >= 0.001 && bullet->get_time() > max_lifetime) {
-			bullet->pop();
-		} else if (play_area_mode == INFINITE || play_area_rect.has_point(bullet->get_position())) {
-			bullet->update(delta);
-			_handle_collisions(bullet, space_state);
+			build_popped_dict(bullet, popped_bullets);
+			_free_bullet(i);
+		} else if (max_lifetime >= 0.001 && bullet->get_age() > max_lifetime) {
+			bullet->state = Bullet::POPPED_LIFETIME_SERVER;
+			build_popped_dict(bullet, popped_bullets);
+			_free_bullet(i);
+		} else if (path.is_valid() && path->get_lifetime() >= 0.001 && bullet->get_path_time() > path->get_lifetime()) {
+			bullet->state = Bullet::POPPED_LIFETIME_BULLET;
+			build_popped_dict(bullet, popped_bullets);
+			_free_bullet(i);
+		} else if ((play_area_mode == INFINITE || play_area_rect.has_point(bullet->get_position()) && path.is_valid())) {
+			bullet->set_position(bullet->get_position() + path->get_step(bullet->get_path_time(), delta));
+			_handle_collisions(bullet, space_state, collision_info);
+		} else if (_bullet_trajectory_valid(bullet->get_position(), bullet->get_direction()) && path.is_valid()) {
+			bullet->set_position(bullet->get_position() + path->get_step(bullet->get_path_time(), delta));
 		} else {
-			if (play_area_allow_incoming && bullet->get_direction().dot(play_area_rect.position + play_area_rect.size / 2 - bullet->get_position()) >= 0) {
-				bullet->update(delta);
-			} else {
-				bullet->pop();
-			}
+			bullet->state = Bullet::POPPED_OUT_OF_BOUNDS;
+			build_popped_dict(bullet, popped_bullets);
+			_free_bullet(i);
 		}
 	}
 
-	for (int i = 0; i < bullet_indices_to_clear.size(); i++) {
-		Bullet *bullet = live_bullets[bullet_indices_to_clear[i] - i];
-		live_bullets.remove_at(bullet_indices_to_clear[i] - i);
-		dead_bullets.insert(0, bullet);
+	if (!collision_info.is_empty()) {
+		emit_signal("collisions_detected", collision_info);
+	}
+
+	if (!popped_bullets.is_empty()) {
+		emit_signal("bullets_popped", popped_bullets);
 	}
 }
 
-void BulletServer::_handle_collisions(Bullet *bullet, PhysicsDirectSpaceState2D *space_state) {
+void BulletServer::_handle_collisions(Bullet* bullet, PhysicsDirectSpaceState2D* space_state, Dictionary out) {
 	if (!bullet->can_collide()) {
 		return;
 	}
 	Vector<PhysicsDirectSpaceState2D::ShapeResult> results = Vector<PhysicsDirectSpaceState2D::ShapeResult>();
 	results.resize(max_collisions_per_bullet);
-	Ref<BulletType> b_type = bullet->get_type();
+
+	Ref<BulletTexture> b_tex = bullet->get_texture();
 	PhysicsDirectSpaceState2D::ShapeParameters shape_params = PhysicsDirectSpaceState2D::ShapeParameters();
 
-	shape_params.shape_rid = b_type->get_collision_shape()->get_rid();
+	shape_params.shape_rid = b_tex->get_collision_shape()->get_rid();
 	shape_params.transform = bullet->get_transform();
 	shape_params.motion = Vector2(0, 0);
 	shape_params.margin = 0.0;
 	shape_params.exclude = HashSet<RID>();
-	shape_params.collision_mask = b_type->get_collision_mask();
-	shape_params.collide_with_bodies = b_type->get_collision_detect_bodies();
-	shape_params.collide_with_areas = b_type->get_collision_detect_areas();
+	shape_params.collision_mask = b_tex->get_collision_mask();
+	shape_params.collide_with_bodies = b_tex->get_collision_detect_bodies();
+	shape_params.collide_with_areas = b_tex->get_collision_detect_areas();
+
 
 	int collisions = space_state->intersect_shape(shape_params, results.ptrw(), results.size());
 	if (collisions > 0) {
-		Array colliders;
-		Array shapes;
-		colliders.resize(collisions);
-		shapes.resize(collisions);
-		for (int c = 0; c < collisions; c++) {
-			colliders[c] = results[c].collider;
-			shapes[c] = results[c].shape;
+		Array list = Array();
+		for (int i = 0; i < collisions; i++) {
+			Dictionary dict = Dictionary();
+			dict["rid"] = results[i].rid;
+			dict["collider_id"] = results[i].collider_id;
+			dict["collider"] = results[i].collider;
+			dict["shape"] = results[i].shape;
+			list.append(dict);
 		}
-		emit_signal("collision_detected", bullet, colliders);
-		emit_signal("collision_shape_detected", bullet, colliders, shapes);
+		out[bullet] = list;
+
 		if (pop_on_collide) {
-			bullet->pop();
+			bullet->state = Bullet::POPPED_COLLIDE;
 		}
 	}
 }
 
 void BulletServer::_init_bullets() {
-	for (int i = 0; i < bullet_pool_size; i++) {
-		_create_bullet();
+	ERR_FAIL_COND(!is_inside_tree());
+	bullet_pool = memnew_arr(Bullet*, bullet_pool_size);
+	for (int i = 0; i < bullet_pool_size; ++i) {
+		bullet_pool[i] = memnew(Bullet);
+		RS::get_singleton()->canvas_item_set_parent(bullet_pool[i]->get_ci_rid(), get_viewport()->find_world_2d()->get_canvas());
 	}
-}
-
-void BulletServer::_create_bullet() {
-	Bullet *bullet = memnew(Bullet);
-	RS::get_singleton()->canvas_item_set_parent(bullet->get_ci_rid(), get_canvas_item());
-	dead_bullets.insert(0, bullet);
 }
 
 void BulletServer::_uninit_bullets() {
-	for (int i = 0; i < live_bullets.size(); i++) {
-		memdelete(live_bullets[i]);
+	if (bullet_pool == nullptr) { return; }
+
+	for (int i = 0; i < bullet_pool_size; ++i) {
+		memdelete(bullet_pool[i]);
 	}
-	for (int i = 0; i < dead_bullets.size(); i++) {
-		memdelete(dead_bullets[i]);
+	memdelete_arr(bullet_pool);
+	bullet_pool = nullptr;
+}
+
+void BulletServer::_free_bullet(int index) {
+	Bullet* bullet = bullet_pool[index];
+	RS::get_singleton()->canvas_item_set_visible(bullet->get_ci_rid(), false);
+
+	bullet_pool[index] = bullet_pool[live_bullet_count-1];
+	bullet_pool[live_bullet_count-1] = bullet;
+	live_bullet_count--;
+	_heapify(index);
+}
+
+void BulletServer::_heapify(int index) {
+	while (index < MIN(live_bullet_count, bullet_pool_size)) {
+		bool a = 2*index + 1 < MIN(live_bullet_count, bullet_pool_size) &&
+				bullet_pool[index]->spawntime > bullet_pool[2*index + 1]->spawntime;
+		bool b = 2*index + 2 < MIN(live_bullet_count, bullet_pool_size) &&
+				bullet_pool[index]->spawntime > bullet_pool[2*index + 2]->spawntime;
+		bool c = 2*index + 2 < MIN(live_bullet_count, bullet_pool_size) &&
+				bullet_pool[2*index + 1]->spawntime < bullet_pool[2*index + 2]->spawntime;;
+		
+		if (!a && !b) { return; }
+
+		int next;
+		if (a && !b || a && c) {
+			next = 2*index + 1;
+		} else if (b && !c) {
+			next = 2*index + 2;
+		}
+
+		Bullet* temp = bullet_pool[index];
+		bullet_pool[index] = bullet_pool[next];
+		bullet_pool[next] = temp;
+		
+		index = next;
 	}
 }
 
@@ -134,80 +201,115 @@ void BulletServer::_update_play_area() {
 	if (play_area_mode != VIEWPORT) {
 		return;
 	}
-	Transform2D canvas_transform = get_canvas_transform();
-	Vector2 view_pos = -canvas_transform.get_origin() / canvas_transform.get_scale();
-	Vector2 view_size = get_viewport_rect().size / canvas_transform.get_scale();
-	play_area_rect = Rect2(view_pos, view_size).grow(play_area_margin);
+	
+	ERR_FAIL_COND(!is_inside_tree());
+	play_area_rect = get_viewport()->get_visible_rect().grow(play_area_margin);
 }
 
-void BulletServer::spawn_bullet(const Ref<BulletType> &p_type, const Vector2 &p_position, const Vector2 &p_direction) {
-	Bullet *bullet;
+#define OUTCODE_UP 1
+#define OUTCODE_DOWN 2
+#define OUTCODE_LEFT 4
+#define OUTCODE_RIGHT 8
 
-	if (dead_bullets.size() > 0) {
-		bullet = dead_bullets.get(dead_bullets.size() - 1);
-		dead_bullets.remove_at(dead_bullets.size() - 1);
-	} else {
-		bullet = live_bullets.get(live_bullets.size() - 1);
-		live_bullets.remove_at(live_bullets.size() - 1);
+int _compute_out_code(const Rect2 &p_rect, const Vector2 &p_pos) {
+	int out_code = 0;
+
+	if (p_pos.y < p_rect.position.y) {
+		out_code |= OUTCODE_UP;
+	} else if (p_pos.y > p_rect.position.y + p_rect.size.y) {
+		out_code |= OUTCODE_DOWN;
 	}
 
-	bullet->spawn(p_type, p_position, p_direction);
-	RS::get_singleton()->canvas_item_set_draw_index(bullet->get_ci_rid(), 0);
-	live_bullets.insert(0, bullet);
+	if (p_pos.x < p_rect.position.x) {
+		out_code |= OUTCODE_LEFT;
+	} else if (p_pos.x > p_rect.position.x + p_rect.size.x) {
+		out_code |= OUTCODE_RIGHT;
+	}
+
+	return out_code;
 }
 
-void BulletServer::spawn_volley(const Ref<BulletType> &p_type, const Vector2 &p_origin, const Array &p_volley) {
+bool BulletServer::_bullet_trajectory_valid(const Vector2 &p_pos, const Vector2 &p_dir) const {
+	if (play_area_mode == INFINITE) { return true; }
+
+	int clip_pos = _compute_out_code(play_area_rect, p_pos);
+
+	if (clip_pos == 0) { return true; }
+	if (!play_area_allow_incoming) { return false; }
+	
+	int clip_dest = _compute_out_code(
+			play_area_rect, 
+			p_pos + MAX((play_area_rect.position + play_area_rect.size/2 - p_pos).length(), play_area_rect.size.length())*p_dir
+	);
+
+	if ((clip_pos & clip_dest) != 0) { return false; }
+
+	return true;
+}
+
+void BulletServer::spawn_bullet(const Vector2 &p_position, const Ref<BulletPath> &p_path, const Ref<BulletTexture> &p_texture, const Dictionary &p_custom_data) {
+	if (!_bullet_trajectory_valid(p_position, p_path->get_direction(0))) {
+		return;
+	}
+
+	int index = 0;
+	if (live_bullet_count < bullet_pool_size) {
+		index = live_bullet_count;
+		live_bullet_count++;
+	}
+
+	Bullet* bullet = bullet_pool[index];
+
+	bullet->transform.set_rotation(0);//p_path->get_rotation(0));
+	bullet->transform.set_origin(p_position);
+	bullet->set_path(p_path);
+	bullet->set_texture(p_texture);
+	bullet->custom_data = p_custom_data;
+	bullet->spawntime = Time::get_singleton()->get_ticks_msec();
+	bullet->state = Bullet::LIVE;
+	RS::get_singleton()->canvas_item_set_visible(bullet->get_ci_rid(), true);
+	RS::get_singleton()->canvas_item_set_draw_index(bullet->get_ci_rid(), 0);
+
+	_heapify(index);
+}
+
+void BulletServer::spawn_volley(const Vector2 &p_origin, const Array &p_volley, const Ref<BulletTexture> &p_texture, const Dictionary &p_custom_data) {
 	for (int i = 0; i < p_volley.size(); i++) {
 		Dictionary shot = p_volley[i];
-		spawn_bullet(p_type, p_origin + shot["position"], shot["direction"]);
+		spawn_bullet(p_origin + shot["position"], shot["path"], p_texture, p_custom_data);
 	}
 }
 
 void BulletServer::clear_bullets() {
-	for (int i = 0; i < live_bullets.size(); i++) {
-		live_bullets[i]->pop();
+	for (int i = 0; i < live_bullet_count; i++) {
+		bullet_pool[i]->state = Bullet::POPPED_REQUESTED;
 	}
 }
 
 Array BulletServer::get_live_bullets() {
 	Array bullets;
-	for (int i = 0; i < live_bullets.size(); i++) {
-		bullets.push_back(live_bullets[i]);
+	for (int i = 0; i < live_bullet_count; i++) {
+		bullets.push_back(bullet_pool[i]);
 	}
 	return bullets;
 }
 
 int BulletServer::get_live_bullet_count() {
-	return live_bullets.size();
+	return live_bullet_count;
 }
 
 Array BulletServer::get_live_bullet_positions() {
 	Array bullet_positions;
-	for (int i = 0; i < live_bullets.size(); i++) {
-		bullet_positions.push_back(live_bullets[i]->get_position());
+	for (int i = 0; i < live_bullet_count; i++) {
+		bullet_positions.push_back(bullet_pool[i]->get_position());
 	}
 	return bullet_positions;
 }
 
 void BulletServer::set_bullet_pool_size(int p_size) {
+	ERR_FAIL_COND_MSG(is_inside_tree() && !Engine::get_singleton()->is_editor_hint(), "Cannot resize bullet pool while server in in scene tree.");
 	if (p_size > -1)
 		bullet_pool_size = p_size;
-	if (!is_inside_tree() || Engine::get_singleton()->is_editor_hint())
-		return;
-	while (int(dead_bullets.size() + live_bullets.size()) < bullet_pool_size)
-		_create_bullet();
-	while (int(dead_bullets.size() + live_bullets.size()) > bullet_pool_size) {
-		Bullet *bullet;
-		if (dead_bullets.size() > 0) {
-			bullet = dead_bullets.get(dead_bullets.size() - 1);
-			dead_bullets.remove_at(dead_bullets.size() - 1);
-		} else {
-			bullet = live_bullets.get(live_bullets.size() - 1);
-			live_bullets.remove_at(live_bullets.size() - 1);
-		}
-		RS::get_singleton()->free(bullet->get_ci_rid());
-		memdelete(bullet);
-	}
 }
 
 int BulletServer::get_bullet_pool_size() const {
@@ -290,8 +392,8 @@ void BulletServer::_validate_property(PropertyInfo &property) const {
 }
 
 void BulletServer::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("spawn_bullet", "type", "position", "direction"), &BulletServer::spawn_bullet);
-	ClassDB::bind_method(D_METHOD("spawn_volley", "type", "position", "volley"), &BulletServer::spawn_volley);
+	ClassDB::bind_method(D_METHOD("spawn_bullet", "position", "path", "texture", "custom_data"), &BulletServer::spawn_bullet);
+	ClassDB::bind_method(D_METHOD("spawn_volley", "position", "volley",  "texture", "custom_data"), &BulletServer::spawn_volley);
 	ClassDB::bind_method(D_METHOD("clear_bullets"), &BulletServer::clear_bullets);
 
 	ClassDB::bind_method(D_METHOD("get_live_bullets"), &BulletServer::get_live_bullets);
@@ -322,23 +424,25 @@ void BulletServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_play_area_allow_incoming", "allow_incoming"), &BulletServer::set_play_area_allow_incoming);
 	ClassDB::bind_method(D_METHOD("get_play_area_allow_incoming"), &BulletServer::get_play_area_allow_incoming);
 
-	ClassDB::bind_method(D_METHOD("set_relay_autoconnect", "allow_incoming"), &BulletServer::set_relay_autoconnect);
+	ClassDB::bind_method(D_METHOD("set_relay_autoconnect", "relay_autoconnect"), &BulletServer::set_relay_autoconnect);
 	ClassDB::bind_method(D_METHOD("get_relay_autoconnect"), &BulletServer::get_relay_autoconnect);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "bullet_pool_size", PROPERTY_HINT_RANGE, "1,5000,1,or_greater"), "set_bullet_pool_size", "get_bullet_pool_size");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "max_lifetime", PROPERTY_HINT_RANGE, "0,300,0.01,or_greater"), "set_max_lifetime", "get_max_lifetime");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "pop_on_collide"), "set_pop_on_collide", "get_pop_on_collide");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_collisions_per_bullet", PROPERTY_HINT_RANGE, "1,256,1,or_greater"), "set_max_collisions_per_bullet", "get_max_collisions_per_bullet");
+	
 	ADD_GROUP("Play Area", "play_area_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "play_area_mode", PROPERTY_HINT_ENUM, "Viewport,Manual,Infinite"), "set_play_area_mode", "get_play_area_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::RECT2, "play_area_rect"), "set_play_area_rect", "get_play_area_rect");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "play_area_margin", PROPERTY_HINT_RANGE, "0,300,0.01,or_lesser,or_greater"), "set_play_area_margin", "get_play_area_margin");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "play_area_margin", PROPERTY_HINT_RANGE, "0,300,0.01,or_less,or_greater"), "set_play_area_margin", "get_play_area_margin");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "play_area_allow_incoming"), "set_play_area_allow_incoming", "get_play_area_allow_incoming");
+
 	ADD_GROUP("Relay", "relay_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "relay_autoconnect"), "set_relay_autoconnect", "get_relay_autoconnect");
 
-	ADD_SIGNAL(MethodInfo("collision_detected", PropertyInfo(Variant::OBJECT, "bullet", PROPERTY_HINT_RESOURCE_TYPE, "Bullet"), PropertyInfo(Variant::ARRAY, "colliders")));
-	ADD_SIGNAL(MethodInfo("collision_shape_detected", PropertyInfo(Variant::OBJECT, "bullet", PROPERTY_HINT_RESOURCE_TYPE, "Bullet"), PropertyInfo(Variant::ARRAY, "colliders"), PropertyInfo(Variant::ARRAY, "shapes")));
+	ADD_SIGNAL(MethodInfo("collisions_detected", PropertyInfo(Variant::DICTIONARY, "collisions")));
+	ADD_SIGNAL(MethodInfo("bullets_popped", PropertyInfo(Variant::ARRAY, "bullets")));
 	BIND_ENUM_CONSTANT(VIEWPORT);
 	BIND_ENUM_CONSTANT(MANUAL);
 	BIND_ENUM_CONSTANT(INFINITE);
@@ -346,6 +450,8 @@ void BulletServer::_bind_methods() {
 
 BulletServer::BulletServer() {
 	bullet_pool_size = 1500;
+	bullet_pool = nullptr;
+	live_bullet_count = 0;
 	max_lifetime = 0.0;
 	max_collisions_per_bullet = 32;
 	play_area_allow_incoming = true;
@@ -357,4 +463,5 @@ BulletServer::BulletServer() {
 }
 
 BulletServer::~BulletServer() {
+	_uninit_bullets();
 }
