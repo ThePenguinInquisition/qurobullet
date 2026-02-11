@@ -260,7 +260,7 @@ void BulletServer::spawn_bullet(const Vector2 &p_position, const Ref<BulletPath>
 
 	Bullet* bullet = bullet_pool[index];
 
-	bullet->transform.set_rotation(0);//p_path->get_rotation(0));
+	bullet->transform.set_rotation(p_path->get_rotation(0));//p_path->get_rotation(0));
 	bullet->transform.set_origin(p_position);
 	bullet->set_path(p_path);
 	bullet->set_texture(p_texture);
